@@ -1,5 +1,5 @@
 #include <stdint.h>
-
+#include <math.h>
 #include "stm32f446xx.h"
 #include "led.h"
 
@@ -282,46 +282,79 @@ volatile uint32_t timestamp = 0;
 //#define APBx_FREQ 			32500000
 #define APBx_FREQ 			32500000
 
+float calcFunction(float, int, int, int, int);
+
+
+union bufferTX {
+    float DATA_TX[2];
+    struct {
+       float resSin;
+       float resTime;
+    };
+};
+
+union bufferRX {
+    uint8_t DATA_RX[4];
+
+    struct {
+         uint8_t A;
+        uint8_t freq;
+        uint8_t phase;
+        uint8_t bias;
+    };
+};
+
+union bufferTX BUFFER_TX;
+union bufferRX BUFFER_RX;
+
 uint8_t tx_data[5];
 uint8_t ret_data = 5;
 
+// union
+//uint8_t DATA_RX[4] = {4, 3, 90, 3};
+uint8_t DATA_RX[4] = {0, 0, 0, 0};
+float DATA_TX[2] = {5.0, 5.0};
+//uint16_t DATA_TX[2] = {1,1};
 
-
-
-void TIM6_DAC_IRQHandler()
-{
-    // Проверяем, было ли прерывание от таймера...
-    if(TIM6->SR&TIM_SR_UIF)
-    {
-        // Сбрасываем бит TIM_SR_UIF.
-        TIM6->SR&=~TIM_SR_UIF;
-        mig_led();
-
-        // Выполняем свой код по обработке прерывания.
-        // .....
-    }
-
-    // Проверяем было ли прерывание от DAC и обрабатываем его
-    // (если генерация этого прерывания разрешена настройками DAC).
-    // .....
-}
+void prepareDMA1Stream6(int);
 
 void TIM1_UP_TIM10_IRQHandler(void){
 	if (TIM1->SR & TIM_SR_UIF){
 		TIM1->SR &= ~TIM_SR_UIF;
-		mig_led();
+		//mig_led();
+
+		DATA_TX[0] = calcFunction(DATA_TX[1], DATA_RX[1], DATA_RX[2], DATA_RX[3], DATA_RX[0]);
+		DATA_TX[1] += 0.01;
+		prepareDMA1Stream6(8);
+		//DMA1_Stream6->CR &= ~DMA_SxCR_EN;
 	}
 }
 
+void prepareDMA1Stream5(int dataNum);
 
-#define TIMER_FREQ_I 1
+
+void DMA1_Stream5_IRQHandler(void)
+{
+
+	prepareDMA1Stream5(4);
+	//prepareDMA1Stream6(8);
+	/*
+	if (DMA1->HISR & DMA_HISR_TCIF5){
+		//DMA1_Stream5->CR &= ~DMA_SxCR_EN;
+		prepareDMA1Stream5(1);
+		prepareDMA1Stream6(8);
+		mig_led();
+	}
+	*/
+}
+
+#define TIMER_FREQ_I 10
 #define TIMER_FREQ_OUT 10000 // Hz
 #define MHZ_CONST 1000000
 
 
 void initTimer(Coef_Nums coefs)
 {
-	//coefs.HCKL_ / coefs.APB1_prescaler_T; // Input freq = 130 Mhz
 
 	// Включить тактовый сигнал для TIM6.
 	RCC->APB2ENR |= RCC_APB2ENR_TIM1EN;
@@ -337,24 +370,6 @@ void initTimer(Coef_Nums coefs)
 
 	TIM1->CR1 |= TIM_CR1_CEN;
 
-
-	/*
-	RCC->APB1ENR|=RCC_APB1ENR_TIM6EN;
-	TIM6->PSC =  ( (coefs.HCKL_ * MHZ_CONST / coefs.APB1_prescaler_T) / TIMER_FREQ_OUT - 1);
-	TIM6->CNT = TIMER_FREQ_OUT / TIMER_FREQ_I;
-	TIM6->CR1 |= (TIM_CR1_CEN << 1);
-*/
-
-	/*
-	TIM6->PSC = 0; // делитель
-
-	TIM6->CR1 = 0;
-	TIM6->DIER = 0;
-	TIM6->SR = 0;
-	TIM6->CNT = 0;
-
-	TIM6->ARR = 0;
-*/
 }
 
 
@@ -370,10 +385,10 @@ void prepareDMA1Stream6(int dataNum)
 
 void prepareDMA1Stream5(int dataNum)
 {
-	DMA1_Stream6->NDTR = dataNum;
-	DMA1->HIFCR = DMA_HIFCR_CTCIF6 | DMA_HIFCR_CHTIF6; // half and transfer complete
+	DMA1_Stream5->NDTR = dataNum;
+	DMA1->HIFCR = DMA_HIFCR_CTCIF5 | DMA_HIFCR_CHTIF5; // half and transfer complete
 
-	DMA1_Stream6->CR |= DMA_SxCR_EN;		  // enable stream
+	DMA1_Stream5->CR |= DMA_SxCR_EN;		  // enable stream
 }
 
 
@@ -397,6 +412,8 @@ int main()
 	 * Var 4 CPU = 130 V timer = 9
 	 */
 
+	SCB->CPACR |= ((3UL << 10*2)|(3UL << 11*2));
+
 	/** Laboratory 2 */
 	RCC->AHB1ENR |= 1 | 4;
 
@@ -405,7 +422,7 @@ int main()
 
 	Coef_Nums coefs = Coef_Nums_Start_Init();
 	coefs.F_cpu = 130;
-	coefs.F_in = 24;
+	coefs.F_in = 12;
 	coefs.HCKL_ = 130;
 	coefs = init_coef(coefs);
 	coefs.FLASH_ = 5;
@@ -432,33 +449,46 @@ int main()
 	/** настройка USART */
 	USART2->BRR = APBx_FREQ / BAUDRATE;
 	USART2->CR1 = USART_CR1_UE | USART_CR1_TE | USART_CR1_RE;
-	USART2->CR3 = USART_CR3_DMAT;
+	USART2->CR3 = USART_CR3_DMAT | USART_CR3_DMAR;
+
 
 	/** настройка DMA */ // DMA1 channel 4 USART2_RX - stream5 TX - stream6
 	/**  Stream6 TX ->  память -> переферия DIR=01 */
-	DMA1_Stream6->CR = DMA_SxCR_DIR_0 |  DMA_SxCR_CHSEL_2 | DMA_SxCR_MINC;
-	//DMA1_Stream6->CR |= DMA_SxCR_MSIZE_0; // 8bit
-
+	DMA1_Stream6->CR = DMA_SxCR_DIR_0 |  DMA_SxCR_CHSEL_2 | DMA_SxCR_MINC; //DMA1_Stream6->CR |= DMA_SxCR_MSIZE_0; // 8bit
+	//DMA1_Stream6->CR |= DMA_SxCR_MSIZE_0;
 	DMA1_Stream6->PAR = (uint32_t) &USART2->DR;
-	DMA1_Stream6->M0AR = (uint32_t) &ret_data;
+	DMA1_Stream6->M0AR = (uint32_t) &DATA_TX;
 
 
-	DMA1_Stream5->CR = DMA_SxCR_CHSEL_2 | DMA_SxCR_PINC;
-	//DMA1_Stream5->CR |= DMA_SxCR_MSIZE_0; // 8bit
+	/** Stream5 Rx -> periph -> memory */
 
+	DMA1_Stream5->CR = DMA_SxCR_CHSEL_2 | DMA_SxCR_MINC | DMA_SxCR_TCIE; //DMA1_Stream5->CR |= DMA_SxCR_MSIZE_0; // 8bit
+	//DMA1_Stream5->CR |= DMA_SxCR_TCIE;
 	DMA1_Stream5->PAR = (uint32_t) &USART2->DR;
-	DMA1_Stream5->M0AR = (uint32_t) &tx_data;
+	DMA1_Stream5->M0AR = (uint32_t) &DATA_RX;
+
+	NVIC_EnableIRQ(DMA1_Stream5_IRQn);
+	prepareDMA1Stream5(4);
+
 
 	// DMA1_Stream5_IRQn
 
 	for(;;){
-		prepareDMA1Stream6(1);
-		my_delay(500000);
-		DMA1_Stream6->CR &= ~DMA_SxCR_EN;
-		ret_data += 1;
+
 	};
 
 	/** error code on leds **/
 
 	return 0;
 }
+
+
+
+float calcFunction(float t, int A, int freq, int phase, int bias)
+{
+	return A * sinf(freq*t + phase * M_PI/180) + bias;
+	//return A * sinf(freq*t +  M_PI/180) + bias;
+}
+
+
+
